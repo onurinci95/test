@@ -26,6 +26,25 @@ bir erişim yolu ekler.
 | Include Built-in Tabs | Blender'ın kendi Python sekmelerini de ekle |
 | Popover Width | Açılan pencerenin genişliği |
 
+### Header'dan düzenleme (sağ tık)
+
+Header'daki bir sekme butonuna **sağ tıklayın**:
+
+- **Rename...**: butonda görünen ismi değiştir
+- **Set Icon...**: Blender'ın ikon setinden aranabilir listeyle ikon seç
+- **Move Left / Right / to Start / to End**: sırayı değiştir
+- **Hide**: sekmeyi satırdan gizle; **Show Hidden Tabs ▸** ile geri getir
+- **Show in Preset ▸**: sekmeyi diğer preset'lerde aç/kapat
+- **Edit Tabs...**: ayarları aç
+
+*Dropdown* modunda aynı menü, açılan pencerenin başındaki ⌄ butonundadır.
+
+### İkonlar ve buton stili
+
+Her sekmeye ikon atanabilir (sağ tık → Set Icon ya da ayarlardaki listede ikon butonu).
+**Button Style**: *Text*, *Icon + Text* (varsayılan) veya *Icon Only* (kompakt;
+ikonu olmayan sekmeler isimle gösterilir).
+
 ### Preset'ler (sekme setleri)
 
 Her preset kendi sekme listesini (sıra, görünürlük, özel isimler) tutar. Örneğin
@@ -44,6 +63,7 @@ Her preset kendi sekme listesini (sıra, görünürlük, özel isimler) tutar. �
 Ayarlardaki **Tabs** listesi seçili preset'in sekmelerini gösterir; her sekme bir satırdır:
 
 - 👁 göz ikonu: sekmeyi satırda göster / gizle
+- ikon butonu: sekmenin ikonunu seç
 - sağdaki metin kutusu: butonda görünecek özel isim (boş = sekmenin kendi adı)
 - sağdaki oklar: seçili sekmeyi en üste / yukarı / aşağı / en alta taşı
 - 👁 / 🚫: hepsini göster / hepsini gizle

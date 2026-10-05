@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 4, 0),
+    "version": (1, 5, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -69,6 +69,9 @@ _attached_hook = None  # name of the wrapped method when Position = Middle
 # it is detected while drawing, where properties can't be written.
 _last_workspace = None
 _workspace_preset = None  # name of the preset bound to the current workspace
+# Tab (and preset showing it) whose edit menu is open. Menus can't take
+# arguments, so the tab is remembered when its menu is drawn.
+_menu_tab = (None, "")
 
 
 # -----------------------------------------------------------------------------
@@ -227,8 +230,15 @@ def _draw_panel(layout, context, cls, depth=0):
 
 def _make_slot_panel(index, width):
     def draw(self, context):
+        global _menu_tab
         layout = self.layout
         category = _slot_categories.get(index)
+        prefs = _prefs()
+        preset = _effective_preset(prefs, context) if prefs else None
+        _menu_tab = (category, preset.name if preset else "")
+        header = layout.row()
+        header.label(text=category)
+        header.menu("TOPTABS_MT_tab_edit", text="", icon="DOWNARROW_HLT")
         drawn = False
         for cls in _category_panels.get(category, ()):
             if _poll(cls, context):
@@ -305,19 +315,25 @@ def _draw_tabs(layout, context, middle=None):
             "TOPTABS_MT_presets", text=preset.name,
             icon="WORKSPACE" if preset.name == _workspace_preset else "PRESET",
         )
+    style = prefs.button_style
     row = layout.row(align=True)
-    for category, label, visible in _ordered_tabs(prefs, tabs):
+    for category, label, visible, icon in _ordered_tabs(prefs, tabs):
         if not visible:
             continue
         if not any(_poll(cls, context) for cls in _category_panels.get(category, ())):
             continue
+        if style == "TEXT" or not icon:
+            icon = "NONE"
+        elif style == "ICON":
+            label = ""
         if use_sidebar:
             op = row.operator(
-                "toptabs.open_sidebar_tab", text=label, depress=category == active
+                "toptabs.open_sidebar_tab", text=label, icon=icon,
+                depress=category == active,
             )
             op.category = category
         else:
-            row.popover(panel=_proxies[category], text=label)
+            row.popover(panel=_proxies[category], text=label, icon=icon)
     row.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
     if middle is not None:
         layout.separator_spacer()
@@ -459,7 +475,7 @@ def _effective_preset(prefs, context):
 
 
 def _ordered_tabs(prefs, tabs):
-    """Detected tabs as (category, label, visible), in the user's order.
+    """Detected tabs as (category, label, visible, icon), in the user's order.
 
     Tabs the user hasn't seen in the list yet go last and are visible, unless
     they are in the legacy comma separated "Hidden Tabs" string.
@@ -469,11 +485,11 @@ def _ordered_tabs(prefs, tabs):
     for item in tabs:
         if item.name in _proxies and item.name not in seen:
             seen.add(item.name)
-            result.append((item.name, item.label.strip() or item.name, item.visible))
+            result.append((item.name, item.label.strip() or item.name, item.visible, _safe_icon(item.icon, "")))
     legacy_hidden = _excluded_categories(prefs)
     for name in _proxies:
         if name not in seen:
-            result.append((name, name, name.lower() not in legacy_hidden))
+            result.append((name, name, name.lower() not in legacy_hidden, ""))
     return result
 
 
@@ -612,6 +628,10 @@ class TOPTABS_OT_open_sidebar_tab(bpy.types.Operator):
     bl_options = {"INTERNAL"}
 
     category: StringProperty()
+
+    @classmethod
+    def description(cls, _context, properties):
+        return f"Open '{properties.category}' in the sidebar (N panel). Click again to close it.\nRight-click to edit this tab"
 
     def execute(self, context):
         area, region = _find_sidebar(context)
@@ -828,6 +848,248 @@ class TOPTABS_UL_presets(bpy.types.UIList):
         row.prop_search(item, "workspace", bpy.data, "workspaces", text="", icon="WORKSPACE")
 
 
+def _tab_owner(preset_name):
+    prefs = _prefs()
+    if preset_name:
+        preset = prefs.presets.get(preset_name)
+        if preset is not None:
+            return preset
+    return _edit_preset(prefs) or prefs
+
+
+def _find_tab(owner, category):
+    for index, item in enumerate(owner.tabs):
+        if item.name == category:
+            return index, item
+    item = owner.tabs.add()
+    item.name = category
+    return len(owner.tabs) - 1, item
+
+
+class _TabOperator:
+    bl_options = {"INTERNAL"}
+
+    category: StringProperty()
+    preset: StringProperty()
+
+
+class TOPTABS_OT_tab_hide(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_hide"
+    bl_label = "Hide Tab"
+    bl_description = "Hide this tab from the header (it stays in the sidebar)"
+
+    def execute(self, context):
+        _find_tab(_tab_owner(self.preset), self.category)[1].visible = False
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_tab_show(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_show"
+    bl_label = "Show Tab"
+    bl_description = "Show this tab in the header again"
+
+    def execute(self, context):
+        _find_tab(_tab_owner(self.preset), self.category)[1].visible = True
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_tab_move(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_move"
+    bl_label = "Move Tab"
+    bl_description = "Move this tab in the header"
+
+    direction: EnumProperty(items=[
+        ("FIRST", "First", ""), ("LEFT", "Left", ""), ("RIGHT", "Right", ""), ("LAST", "Last", ""),
+    ])
+
+    def execute(self, context):
+        owner = _tab_owner(self.preset)
+        index, _item = _find_tab(owner, self.category)
+        # Move among the buttons actually shown, skipping hidden/unloaded ones.
+        shown = [i for i, t in enumerate(owner.tabs) if t.visible and t.name in _proxies]
+        if index not in shown:
+            return {"CANCELLED"}
+        pos = shown.index(index)
+        target_pos = {
+            "FIRST": 0, "LEFT": pos - 1, "RIGHT": pos + 1, "LAST": len(shown) - 1,
+        }[self.direction]
+        target_pos = max(0, min(len(shown) - 1, target_pos))
+        if target_pos != pos:
+            owner.tabs.move(index, shown[target_pos])
+            _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_tab_rename(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_rename"
+    bl_label = "Rename Tab"
+    bl_description = "Change the name shown on this tab's button"
+
+    label: StringProperty(name="Name", description="Leave empty to use the tab's own name")
+
+    def invoke(self, context, event):
+        item = _find_tab(_tab_owner(self.preset), self.category)[1]
+        self.label = item.label or self.category
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "label")
+        layout.label(text=f"Sidebar tab: {self.category}", icon="INFO")
+
+    def execute(self, context):
+        label = self.label.strip()
+        item = _find_tab(_tab_owner(self.preset), self.category)[1]
+        item.label = "" if label in ("", self.category) else label
+        _redraw_all()
+        return {"FINISHED"}
+
+
+_icon_items = []
+_valid_icons = set()
+
+
+def _safe_icon(name, fallback="NONE"):
+    """`name` if Blender knows this icon, else `fallback` (an unknown icon
+    name raises an error while drawing and would break the whole header)."""
+    if not name:
+        return fallback
+    if not _valid_icons:
+        _valid_icons.update(
+            bpy.types.UILayout.bl_rna.functions["prop"].parameters["icon"].enum_items.keys()
+        )
+    return name if name in _valid_icons else fallback
+
+
+def _icon_enum_items(_self, _context):
+    # Kept in a module level list: Blender needs enum item strings to outlive
+    # the callback.
+    if not _icon_items:
+        icons = bpy.types.UILayout.bl_rna.functions["prop"].parameters["icon"].enum_items
+        _icon_items.append(("NONE", "No Icon", "Don't show an icon", "BLANK1", 0))
+        for number, icon in enumerate(icons, start=1):
+            if icon.identifier != "NONE":
+                _icon_items.append((icon.identifier, icon.identifier.replace("_", " ").title(), "", icon.identifier, number))
+    return _icon_items
+
+
+class TOPTABS_OT_tab_set_icon(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_set_icon"
+    bl_label = "Set Tab Icon"
+    bl_description = "Pick an icon for this tab's button"
+    bl_property = "icon"
+
+    icon: EnumProperty(items=_icon_enum_items)
+
+    def invoke(self, context, event):
+        context.window_manager.invoke_search_popup(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        item = _find_tab(_tab_owner(self.preset), self.category)[1]
+        item.icon = "" if self.icon == "NONE" else self.icon
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_tab_toggle_preset(_TabOperator, bpy.types.Operator):
+    bl_idname = "toptabs.tab_toggle_preset"
+    bl_label = "Show in Preset"
+    bl_description = "Show or hide this tab in the given preset"
+
+    def execute(self, context):
+        item = _find_tab(_tab_owner(self.preset), self.category)[1]
+        item.visible = not item.visible
+        _redraw_all()
+        return {"FINISHED"}
+
+
+def _set_tab_props(op, category, preset):
+    op.category = category
+    op.preset = preset
+    return op
+
+
+def _draw_tab_edit(layout, category, preset):
+    """Items of the edit menu for one tab (right-click / popover ⌄ menu)."""
+    global _menu_tab
+    _menu_tab = (category, preset)
+    layout.label(text=f"Tab: {category}" + (f"  ·  Preset: {preset}" if preset else ""), icon="MENU_PANEL")
+    layout.separator()
+    _set_tab_props(layout.operator("toptabs.tab_rename", text="Rename...", icon="SORTALPHA"), category, preset)
+    _set_tab_props(layout.operator("toptabs.tab_set_icon", text="Set Icon...", icon="IMAGE_DATA"), category, preset)
+    layout.separator()
+    for direction, text, icon in (
+        ("LEFT", "Move Left", "TRIA_LEFT"), ("RIGHT", "Move Right", "TRIA_RIGHT"),
+        ("FIRST", "Move to Start", "TRIA_LEFT_BAR"), ("LAST", "Move to End", "TRIA_RIGHT_BAR"),
+    ):
+        _set_tab_props(layout.operator("toptabs.tab_move", text=text, icon=icon), category, preset).direction = direction
+    layout.separator()
+    _set_tab_props(layout.operator("toptabs.tab_hide", text="Hide", icon="HIDE_ON"), category, preset)
+    prefs = _prefs()
+    if len(prefs.presets) > 1:
+        layout.menu("TOPTABS_MT_tab_presets", icon="PRESET")
+    layout.menu("TOPTABS_MT_hidden_tabs", icon="HIDE_OFF")
+    layout.separator()
+    layout.operator("preferences.addon_show", text="Edit Tabs...", icon="PREFERENCES").module = ADDON_ID
+
+
+class TOPTABS_MT_tab_edit(bpy.types.Menu):
+    bl_label = "Edit Tab"
+
+    def draw(self, context):
+        category, preset = _menu_tab
+        if category:
+            _draw_tab_edit(self.layout, category, preset)
+
+
+class TOPTABS_MT_tab_presets(bpy.types.Menu):
+    bl_label = "Show in Preset"
+
+    def draw(self, context):
+        category, _preset = _menu_tab
+        for preset in _prefs().presets:
+            item = next((t for t in preset.tabs if t.name == category), None)
+            shown = item is None or item.visible
+            _set_tab_props(
+                self.layout.operator(
+                    "toptabs.tab_toggle_preset", text=preset.name,
+                    icon="CHECKBOX_HLT" if shown else "CHECKBOX_DEHLT",
+                ),
+                category, preset.name,
+            )
+
+
+class TOPTABS_MT_hidden_tabs(bpy.types.Menu):
+    bl_label = "Show Hidden Tabs"
+
+    def draw(self, context):
+        _category, preset = _menu_tab
+        owner = _tab_owner(preset)
+        hidden = [t for t in owner.tabs if not t.visible and t.name in _proxies]
+        if not hidden:
+            self.layout.label(text="No hidden tabs")
+        for item in hidden:
+            _set_tab_props(
+                self.layout.operator("toptabs.tab_show", text=item.label or item.name, icon=_safe_icon(item.icon)),
+                item.name, preset,
+            )
+
+
+def _button_context_menu(self, context):
+    """Right-click on a tab button in the header."""
+    op = getattr(context, "button_operator", None)
+    if op is None or getattr(op.bl_rna, "identifier", "") != "TOPTABS_OT_open_sidebar_tab":
+        return
+    prefs = _prefs()
+    preset = _effective_preset(prefs, context) if prefs else None
+    layout = self.layout
+    layout.separator()
+    _draw_tab_edit(layout, op.category, preset.name if preset else "")
+
+
 class TOPTABS_UL_tabs(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         loaded = item.name in _proxies
@@ -836,6 +1098,9 @@ class TOPTABS_UL_tabs(bpy.types.UIList):
             item, "visible", text="", emboss=False,
             icon="HIDE_OFF" if item.visible else "HIDE_ON",
         )
+        op = row.operator("toptabs.tab_set_icon", text="", icon=_safe_icon(item.icon, "BLANK1"), emboss=False)
+        op.category = item.name
+        op.preset = data.name if isinstance(data, TOPTABS_PG_preset) else ""
         name = row.row()
         name.active = loaded and item.visible
         name.label(text=item.name if loaded else f"{item.name}  (not loaded)")
@@ -880,6 +1145,10 @@ class TOPTABS_PG_tab(bpy.types.PropertyGroup):
     )
     label: StringProperty(
         name="Custom Name", description="Name shown on the button (empty: use the tab's own name)",
+        default="", update=_on_draw_update,
+    )
+    icon: StringProperty(
+        name="Icon", description="Blender icon shown on the button (empty: no icon)",
         default="", update=_on_draw_update,
     )
 
@@ -949,6 +1218,16 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
     tabs_index: IntProperty(default=0)
     presets: bpy.props.CollectionProperty(type=TOPTABS_PG_preset)
     preset_index: IntProperty(default=0, update=_on_draw_update)
+    button_style: EnumProperty(
+        name="Button Style",
+        items=[
+            ("TEXT", "Text", "Only the tab name"),
+            ("ICON_TEXT", "Icon + Text", "Icon (if set) and name"),
+            ("ICON", "Icon Only", "Only the icon; tabs without an icon show their name"),
+        ],
+        default="ICON_TEXT",
+        update=_on_draw_update,
+    )
     show_preset_menu: BoolProperty(
         name="Preset Menu in Header",
         description="Show a menu to switch presets next to the tabs (when there is more than one preset)",
@@ -963,6 +1242,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         col.prop(self, "location")
         col.prop(self, "position")
         col.prop(self, "click_action")
+        col.prop(self, "button_style")
         if self.location == "VIEW3D_TOOL_HEADER":
             col.label(text="If the row is hidden: Viewport > View > Tool Settings", icon="INFO")
         if self.location == "TOPBAR":
@@ -1014,7 +1294,8 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         if not owner.tabs:
             box.label(text="No tabs yet. They appear here a moment after Blender starts.", icon="INFO")
         else:
-            box.label(text="Eye: show/hide  ·  Right field: custom button name  ·  Arrows: reorder", icon="QUESTION")
+            box.label(text="Eye: show/hide  ·  Icon: click to pick  ·  Right field: custom name  ·  Arrows: reorder", icon="QUESTION")
+            box.label(text="Tip: right-click a tab in the header to rename, move, hide or set its icon", icon="MOUSE_RMB")
 
 
 classes = (
@@ -1028,6 +1309,15 @@ classes = (
     TOPTABS_OT_preset_remove,
     TOPTABS_OT_preset_activate,
     TOPTABS_MT_presets,
+    TOPTABS_OT_tab_hide,
+    TOPTABS_OT_tab_show,
+    TOPTABS_OT_tab_move,
+    TOPTABS_OT_tab_rename,
+    TOPTABS_OT_tab_set_icon,
+    TOPTABS_OT_tab_toggle_preset,
+    TOPTABS_MT_tab_edit,
+    TOPTABS_MT_tab_presets,
+    TOPTABS_MT_hidden_tabs,
     TOPTABS_UL_tabs,
     TOPTABS_UL_presets,
     TOPTABS_PG_tab,
@@ -1047,6 +1337,7 @@ def register():
         _attach_header("VIEW3D_TOOL_HEADER")
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    bpy.types.UI_MT_button_context_menu.append(_button_context_menu)
     # Delay the first scan so add-ons enabled after this one are picked up too.
     bpy.app.timers.register(_refresh_timer, first_interval=0.5, persistent=True)
 
@@ -1057,6 +1348,10 @@ def unregister():
         bpy.app.timers.unregister(_refresh_timer)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    try:
+        bpy.types.UI_MT_button_context_menu.remove(_button_context_menu)
+    except Exception:
+        pass
     _detach_header()
     _proxies.clear()
     _slot_categories.clear()
