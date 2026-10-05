@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -42,6 +42,17 @@ HEADER_TYPES = {
     "TOPBAR": "TOPBAR_HT_upper_bar",
 }
 
+# For Position = Middle: header method to wrap, whether it is a staticmethod
+# taking (layout, context), and whether our tabs go before or after it.
+MIDDLE_HOOKS = {
+    # Tool settings | spacer | <tabs> spacer | Options
+    "VIEW3D_TOOL_HEADER": ("draw_mode_settings", False, "BEFORE"),
+    # Menus | spacer | Orientation/Pivot/Snap <tabs> | spacer | Shading
+    "VIEW3D_HEADER": ("draw_xform_template", True, "AFTER"),
+    # Menus, Workspaces | spacer <tabs> spacer
+    "TOPBAR": ("draw_left", False, "AFTER"),
+}
+
 # category -> slot panel idname (in display order)
 _proxies = {}
 # slot index -> category
@@ -53,6 +64,7 @@ _category_panels = {}
 _children = {}
 _signature = None
 _attached_header = None
+_attached_hook = None  # name of the wrapped method when Position = Middle
 
 
 # -----------------------------------------------------------------------------
@@ -258,6 +270,11 @@ def _unregister_slots():
 
 
 def _draw_header(self, context):
+    _draw_tabs(self.layout, context)
+
+
+def _draw_tabs(layout, context, middle=None):
+    """Draw the tab buttons. `middle` is the hook's side ("BEFORE"/"AFTER")."""
     prefs = _prefs()
     if prefs is None or not prefs.enabled:
         return
@@ -274,8 +291,7 @@ def _draw_header(self, context):
         if area is not None and area.spaces.active.show_region_ui:
             active = _active_category(region)
 
-    layout = self.layout
-    if prefs.align_right:
+    if middle == "AFTER" or (middle is None and prefs.align_right):
         layout.separator_spacer()
     row = layout.row(align=True)
     for category, label, visible in _ordered_tabs(prefs):
@@ -291,28 +307,75 @@ def _draw_header(self, context):
         else:
             row.popover(panel=_proxies[category], text=label)
     row.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
+    if middle is not None:
+        layout.separator_spacer()
+
+
+def _our_wrapper(header, name):
+    """Return our wrapper if `header.name` currently is one, else None."""
+    try:
+        attr = inspect.getattr_static(header, name)
+    except AttributeError:
+        return None
+    func = getattr(attr, "__func__", attr)
+    return func if getattr(func, "_toptabs_orig", None) is not None else None
+
+
+def _wrap_middle(header, location):
+    name, is_static, side = MIDDLE_HOOKS[location]
+    orig = inspect.getattr_static(header, name)
+    orig_func = getattr(orig, "__func__", orig)
+
+    if is_static:
+        def wrapper(layout, context):
+            if side == "BEFORE":
+                _draw_tabs(layout, context, middle=side)
+            orig_func(layout, context)
+            if side == "AFTER":
+                _draw_tabs(layout, context, middle=side)
+    else:
+        def wrapper(self, context):
+            if side == "BEFORE":
+                _draw_tabs(self.layout, context, middle=side)
+            orig_func(self, context)
+            if side == "AFTER":
+                _draw_tabs(self.layout, context, middle=side)
+
+    wrapper._toptabs_orig = orig
+    setattr(header, name, staticmethod(wrapper) if is_static else wrapper)
 
 
 def _attach_header(location, position="END"):
-    global _attached_header
+    global _attached_header, _attached_hook
     _detach_header()
     header = getattr(bpy.types, HEADER_TYPES[location], None)
-    if header is not None:
-        if position == "START":
-            header.prepend(_draw_header)
-        else:
-            header.append(_draw_header)
-        _attached_header = header
+    if header is None:
+        return
+    hook = MIDDLE_HOOKS.get(location)
+    if position == "MIDDLE" and hook and hasattr(header, hook[0]):
+        _wrap_middle(header, location)
+        _attached_hook = hook[0]
+    elif position == "START":
+        header.prepend(_draw_header)
+    else:
+        # END, or MIDDLE on a header that doesn't have the expected method.
+        header.append(_draw_header)
+    _attached_header = header
 
 
 def _detach_header():
-    global _attached_header
+    global _attached_header, _attached_hook
     if _attached_header is not None:
         try:
             _attached_header.remove(_draw_header)
         except Exception:
             pass
+        if _attached_hook:
+            wrapper = _our_wrapper(_attached_header, _attached_hook)
+            if wrapper is not None:
+                setattr(_attached_header, _attached_hook, wrapper._toptabs_orig)
         _attached_header = None
+        _attached_hook = None
 
 
 def _ensure_attached():
@@ -327,9 +390,14 @@ def _ensure_attached():
     header = getattr(bpy.types, HEADER_TYPES[location], None)
     if header is None:
         return False
-    draw_funcs = getattr(getattr(header, "draw", None), "_draw_funcs", None) or ()
-    if header is _attached_header and _draw_header in draw_funcs:
-        return False
+    if header is _attached_header:
+        if _attached_hook:
+            if _our_wrapper(header, _attached_hook) is not None:
+                return False
+        else:
+            draw_funcs = getattr(getattr(header, "draw", None), "_draw_funcs", None) or ()
+            if _draw_header in draw_funcs:
+                return False
     _attach_header(location, position)
     return True
 
@@ -691,9 +759,10 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         name="Position",
         items=[
             ("START", "Start", "Before the header's own buttons (left side)"),
+            ("MIDDLE", "Middle", "Centered in the free space of the header"),
             ("END", "End", "After the header's own buttons and other add-ons (right side)"),
         ],
-        default="END",
+        default="MIDDLE",
         update=_on_location_update,
     )
     align_right: BoolProperty(
@@ -725,7 +794,8 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
             col.label(text="If the row is hidden: Viewport > View > Tool Settings", icon="INFO")
         if self.location == "TOPBAR":
             col.label(text="Some panels may not work outside the 3D Viewport", icon="ERROR")
-        col.prop(self, "align_right")
+        if self.position != "MIDDLE":
+            col.prop(self, "align_right")
         col.prop(self, "include_builtin")
         col.prop(self, "popover_width")
 
