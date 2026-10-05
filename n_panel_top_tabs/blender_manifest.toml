@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "n_panel_top_tabs"
+version = "1.0.0"
+name = "N-Panel Top Tabs"
+tagline = "Show sidebar (N panel) add-on tabs as horizontal header buttons"
+maintainer = "onurinci95"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["3D View", "User Interface"]
