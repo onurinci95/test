@@ -12,16 +12,14 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 0, 0),
+    "version": (1, 0, 1),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
     "category": "Interface",
 }
 
-import hashlib
 import inspect
-import re
 import types
 
 import bpy
@@ -30,6 +28,10 @@ from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 ADDON_ID = __package__ or __name__
 PROXY_PREFIX = "TOPTABS_PT_"
 REFRESH_INTERVAL = 2.0
+# Popover panels are registered once in register() and reused; refreshing only
+# reassigns which category each slot shows. Registering classes later (from a
+# timer or load_post at startup) proved unreliable.
+MAX_SLOTS = 64
 
 # Blender'ın kendi Python arayüz modülleri (Item/Tool/View vb.)
 BUILTIN_MODULE_PREFIXES = ("bl_ui", "bl_operators")
@@ -40,8 +42,11 @@ HEADER_TYPES = {
     "TOPBAR": "TOPBAR_HT_upper_bar",
 }
 
-# category -> proxy panel idname
+# category -> slot panel idname (in display order)
 _proxies = {}
+# slot index -> category
+_slot_categories = {}
+_slot_classes = []
 # category -> [top-level panel classes]
 _category_panels = {}
 # parent idname -> [child panel classes]
@@ -116,12 +121,6 @@ def _collect(prefs):
     for panels in children.values():
         panels.sort(key=order_key)
     return categories, children
-
-
-def _proxy_idname(category):
-    slug = re.sub(r"[^A-Za-z0-9]", "_", category)[:32]
-    digest = hashlib.md5(category.encode("utf-8")).hexdigest()[:6]
-    return f"{PROXY_PREFIX}{slug}_{digest}"
 
 
 def _poll(cls, context):
@@ -210,24 +209,25 @@ def _draw_panel(layout, context, cls, depth=0):
         _draw_panel(body, context, child, depth + 1)
 
 
-def _make_proxy_panel(category, idname, width):
+def _make_slot_panel(index, width):
     def draw(self, context):
         layout = self.layout
-        panels = _category_panels.get(category, ())
+        category = _slot_categories.get(index)
         drawn = False
-        for cls in panels:
+        for cls in _category_panels.get(category, ()):
             if _poll(cls, context):
                 _draw_panel(layout, context, cls)
                 drawn = True
         if not drawn:
             layout.label(text="Nothing to show in this context", icon="INFO")
 
+    idname = f"{PROXY_PREFIX}slot_{index}"
     return type(
         idname,
         (bpy.types.Panel,),
         {
             "bl_idname": idname,
-            "bl_label": category,
+            "bl_label": "Top Tab",
             "bl_space_type": "VIEW_3D",
             "bl_region_type": "HEADER",
             "bl_ui_units_x": width,
@@ -236,14 +236,37 @@ def _make_proxy_panel(category, idname, width):
     )
 
 
+def _register_slots(width):
+    _unregister_slots()
+    for index in range(MAX_SLOTS):
+        cls = _make_slot_panel(index, width)
+        bpy.utils.register_class(cls)
+        _slot_classes.append(cls)
+
+
+def _unregister_slots():
+    for cls in reversed(_slot_classes):
+        try:
+            bpy.utils.unregister_class(cls)
+        except RuntimeError:
+            pass
+    _slot_classes.clear()
+
+
 # -----------------------------------------------------------------------------
 # Header
 
 
 def _draw_header(self, context):
     prefs = _prefs()
-    if prefs is None or not prefs.enabled or not _proxies:
+    if prefs is None or not prefs.enabled:
         return
+    if not _proxies:
+        # Scanning is read-only, so it is safe to do from a draw callback.
+        try:
+            refresh(redraw=False)
+        except Exception as ex:
+            print(f"[N-Panel Top Tabs] refresh failed: {ex}")
     excluded = _excluded_categories(prefs)
 
     layout = self.layout
@@ -282,10 +305,12 @@ def _detach_header():
 
 
 def _redraw_all():
-    wm = bpy.context.window_manager
+    wm = getattr(bpy.context, "window_manager", None)
     if wm is None:
         return
     for window in wm.windows:
+        if window.screen is None:
+            continue
         for area in window.screen.areas:
             area.tag_redraw()
 
@@ -294,45 +319,34 @@ def _redraw_all():
 # Refresh (add-ons can be enabled/disabled at any time)
 
 
-def _unregister_proxies():
-    for idname in _proxies.values():
-        cls = getattr(bpy.types, idname, None)
-        if cls is not None:
-            try:
-                bpy.utils.unregister_class(cls)
-            except RuntimeError:
-                pass
-    _proxies.clear()
-
-
-def refresh(force=False):
+def refresh(force=False, redraw=True):
     global _signature, _category_panels, _children
     prefs = _prefs()
     categories, children = _collect(prefs)
-    width = prefs.popover_width if prefs else 14
     sort_alpha = prefs.sort_alphabetical if prefs else False
 
     signature = (
-        width,
         sort_alpha,
         tuple((cat, tuple(_panel_idname(c) for c in panels)) for cat, panels in categories.items()),
         tuple((p, tuple(_panel_idname(c) for c in kids)) for p, kids in children.items()),
     )
-    if not force and signature == _signature:
+    if not force and signature == _signature and _proxies:
         return False
-    _signature = signature
+
+    names = sorted(categories, key=str.lower) if sort_alpha else list(categories)
+    names = names[: len(_slot_classes)]
 
     _category_panels = categories
     _children = children
+    _proxies.clear()
+    _slot_categories.clear()
+    for index, category in enumerate(names):
+        _slot_categories[index] = category
+        _proxies[category] = _slot_classes[index].bl_idname
+    _signature = signature
 
-    _unregister_proxies()
-    names = sorted(categories, key=str.lower) if sort_alpha else list(categories)
-    for category in names:
-        idname = _proxy_idname(category)
-        bpy.utils.register_class(_make_proxy_panel(category, idname, width))
-        _proxies[category] = idname
-
-    _redraw_all()
+    if redraw:
+        _redraw_all()
     return True
 
 
@@ -369,6 +383,11 @@ def _on_location_update(self, _context):
 
 
 def _on_layout_update(_self, _context):
+    refresh(force=True)
+
+
+def _on_width_update(self, _context):
+    _register_slots(self.popover_width)
     refresh(force=True)
 
 
@@ -414,7 +433,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         name="Sort Alphabetically", default=False, update=_on_layout_update
     )
     popover_width: IntProperty(
-        name="Popover Width", default=14, min=8, max=40, update=_on_layout_update
+        name="Popover Width", default=14, min=8, max=40, update=_on_width_update
     )
     excluded_categories: StringProperty(
         name="Hidden Tabs",
@@ -454,6 +473,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     prefs = _prefs()
+    _register_slots(prefs.popover_width if prefs else 14)
     if prefs:
         _attach_header(prefs.location, prefs.position)
     else:
@@ -471,7 +491,9 @@ def unregister():
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
     _detach_header()
-    _unregister_proxies()
+    _proxies.clear()
+    _slot_categories.clear()
+    _unregister_slots()
     _category_panels.clear()
     _children.clear()
     _signature = None
