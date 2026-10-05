@@ -21,6 +21,7 @@ bir erişim yolu ekler.
 |---|---|
 | Location | Butonların yeri: Tool Settings Header (varsayılan, BlenderKit arama çubuğunun olduğu 2. satır), Viewport Header veya Top Bar |
 | Position | Satırın başına (Start, sol) veya sonuna (End, sağ) ekle |
+| On Click | **Dropdown**: panelleri butonun altında açılan pencerede gösterir. **Open in Sidebar**: N paneli açıp o sekmeye geçer (açık sekmenin butonu basılı görünür, tekrar tıklayınca N panel kapanır) |
 | Align Right | Butonları başlığın sağına yasla |
 | Include Built-in Tabs | Blender'ın kendi Python sekmelerini de ekle |
 | Sort Alphabetically | Sekmeleri alfabetik sırala |

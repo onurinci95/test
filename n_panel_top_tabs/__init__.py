@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 0, 2),
+    "version": (1, 1, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -269,6 +269,13 @@ def _draw_header(self, context):
             print(f"[N-Panel Top Tabs] refresh failed: {ex}")
     excluded = _excluded_categories(prefs)
 
+    use_sidebar = prefs.click_action == "SIDEBAR"
+    active = None
+    if use_sidebar:
+        area, region = _find_sidebar(context)
+        if area is not None and area.spaces.active.show_region_ui:
+            active = _active_category(region)
+
     layout = self.layout
     if prefs.align_right:
         layout.separator_spacer()
@@ -278,7 +285,13 @@ def _draw_header(self, context):
             continue
         if not any(_poll(cls, context) for cls in _category_panels.get(category, ())):
             continue
-        row.popover(panel=idname, text=category)
+        if use_sidebar:
+            op = row.operator(
+                "toptabs.open_sidebar_tab", text=category, depress=category == active
+            )
+            op.category = category
+        else:
+            row.popover(panel=idname, text=category)
     row.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
 
 
@@ -389,6 +402,79 @@ def _on_load_post(*_args):
 # Operators & preferences
 
 
+def _find_sidebar(context):
+    """Return (area, sidebar region) of the 3D Viewport the header belongs to.
+
+    From the top bar there is no viewport in context, so use the largest one.
+    """
+    area = context.area
+    if area is None or area.type != "VIEW_3D":
+        screen = context.screen
+        areas = [a for a in screen.areas if a.type == "VIEW_3D"] if screen else []
+        area = max(areas, key=lambda a: a.width * a.height, default=None)
+    if area is None:
+        return None, None
+    region = next((r for r in area.regions if r.type == "UI"), None)
+    return area, region
+
+
+def _active_category(region):
+    try:
+        return region.active_panel_category if region else None
+    except Exception:
+        return None
+
+
+def _set_category(region, category):
+    try:
+        region.active_panel_category = category
+        return True
+    except Exception:
+        return False
+
+
+class TOPTABS_OT_open_sidebar_tab(bpy.types.Operator):
+    bl_idname = "toptabs.open_sidebar_tab"
+    bl_label = "Open Sidebar Tab"
+    bl_description = "Open this tab in the sidebar (N panel). Click again to close the sidebar"
+    bl_options = {"INTERNAL"}
+
+    category: StringProperty()
+
+    def execute(self, context):
+        area, region = _find_sidebar(context)
+        if area is None or region is None:
+            self.report({"WARNING"}, "No 3D Viewport found")
+            return {"CANCELLED"}
+        space = area.spaces.active
+
+        if space.show_region_ui and _active_category(region) == self.category:
+            space.show_region_ui = False
+            area.tag_redraw()
+            return {"FINISHED"}
+
+        was_hidden = not space.show_region_ui
+        space.show_region_ui = True
+        if not _set_category(region, self.category):
+            # Tab list is only built once the sidebar has been drawn, so retry
+            # shortly after it was opened.
+            category = self.category
+
+            def retry(attempts=[10]):
+                attempts[0] -= 1
+                try:
+                    if _set_category(region, category) or attempts[0] <= 0:
+                        area.tag_redraw()
+                        return None
+                except ReferenceError:
+                    return None
+                return 0.05
+
+            bpy.app.timers.register(retry, first_interval=0.01 if was_hidden else 0.05)
+        area.tag_redraw()
+        return {"FINISHED"}
+
+
 class TOPTABS_OT_refresh(bpy.types.Operator):
     bl_idname = "toptabs.refresh"
     bl_label = "Refresh Top Tabs"
@@ -433,6 +519,15 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         default="VIEW3D_TOOL_HEADER",
         update=_on_location_update,
     )
+    click_action: EnumProperty(
+        name="On Click",
+        items=[
+            ("POPOVER", "Dropdown", "Show the tab's panels in a dropdown under the button"),
+            ("SIDEBAR", "Open in Sidebar", "Open the sidebar (N panel) on this tab; click again to close it"),
+        ],
+        default="POPOVER",
+        update=_on_draw_update,
+    )
     position: EnumProperty(
         name="Position",
         items=[
@@ -471,6 +566,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         col.prop(self, "enabled")
         col.prop(self, "location")
         col.prop(self, "position")
+        col.prop(self, "click_action")
         if self.location == "VIEW3D_TOOL_HEADER":
             col.label(text="If the row is hidden: Viewport > View > Tool Settings", icon="INFO")
         if self.location == "TOPBAR":
@@ -487,6 +583,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
 
 classes = (
     TOPTABS_OT_refresh,
+    TOPTABS_OT_open_sidebar_tab,
     TOPTABS_AP_preferences,
 )
 
