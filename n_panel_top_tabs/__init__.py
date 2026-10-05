@@ -259,12 +259,15 @@ def _draw_header(self, context):
     row.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
 
 
-def _attach_header(location):
+def _attach_header(location, position="END"):
     global _attached_header
     _detach_header()
     header = getattr(bpy.types, HEADER_TYPES[location], None)
     if header is not None:
-        header.append(_draw_header)
+        if position == "START":
+            header.prepend(_draw_header)
+        else:
+            header.append(_draw_header)
         _attached_header = header
 
 
@@ -361,7 +364,7 @@ class TOPTABS_OT_refresh(bpy.types.Operator):
 
 
 def _on_location_update(self, _context):
-    _attach_header(self.location)
+    _attach_header(self.location, self.position)
     _redraw_all()
 
 
@@ -383,10 +386,19 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         name="Location",
         items=[
             ("VIEW3D_HEADER", "Viewport Header", "Main 3D Viewport header (Select / Add / Object row)"),
-            ("VIEW3D_TOOL_HEADER", "Tool Settings Header", "3D Viewport tool settings bar"),
+            ("VIEW3D_TOOL_HEADER", "Tool Settings Header", "3D Viewport tool settings bar (second row, where BlenderKit's search bar is)"),
             ("TOPBAR", "Top Bar", "Window top bar. Panels that rely on the 3D Viewport context may not work here"),
         ],
-        default="VIEW3D_HEADER",
+        default="VIEW3D_TOOL_HEADER",
+        update=_on_location_update,
+    )
+    position: EnumProperty(
+        name="Position",
+        items=[
+            ("START", "Start", "Before the header's own buttons (left side)"),
+            ("END", "End", "After the header's own buttons and other add-ons (right side)"),
+        ],
+        default="END",
         update=_on_location_update,
     )
     align_right: BoolProperty(
@@ -417,6 +429,9 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         col = layout.column()
         col.prop(self, "enabled")
         col.prop(self, "location")
+        col.prop(self, "position")
+        if self.location == "VIEW3D_TOOL_HEADER":
+            col.label(text="If the row is hidden: Viewport > View > Tool Settings", icon="INFO")
         if self.location == "TOPBAR":
             col.label(text="Some panels may not work outside the 3D Viewport", icon="ERROR")
         col.prop(self, "align_right")
@@ -439,7 +454,10 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     prefs = _prefs()
-    _attach_header(prefs.location if prefs else "VIEW3D_HEADER")
+    if prefs:
+        _attach_header(prefs.location, prefs.position)
+    else:
+        _attach_header("VIEW3D_TOOL_HEADER")
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
     # Delay the first scan so add-ons enabled after this one are picked up too.

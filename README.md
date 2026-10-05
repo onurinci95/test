@@ -19,7 +19,8 @@ bir erişim yolu ekler.
 
 | Ayar | Açıklama |
 |---|---|
-| Location | Butonların yeri: Viewport Header (varsayılan), Tool Settings Header veya Top Bar |
+| Location | Butonların yeri: Tool Settings Header (varsayılan, BlenderKit arama çubuğunun olduğu 2. satır), Viewport Header veya Top Bar |
+| Position | Satırın başına (Start, sol) veya sonuna (End, sağ) ekle |
 | Align Right | Butonları başlığın sağına yasla |
 | Include Built-in Tabs | Blender'ın kendi Python sekmelerini de ekle |
 | Sort Alphabetically | Sekmeleri alfabetik sırala |
@@ -33,7 +34,8 @@ güncellenir; satırın sonundaki ⟳ butonu ile elle de yenileyebilirsiniz.
 
 - **Top Bar** konumunda aktif alan 3D Viewport olmadığı için, `context.space_data`
   gibi viewport verisine dayanan paneller hata verebilir (hata, popover içinde
-  etiket olarak gösterilir, Blender çökmez). En iyi sonuç için Viewport Header
-  önerilir.
+  etiket olarak gösterilir, Blender çökmez). En iyi sonuç için Tool Settings Header
+  veya Viewport Header önerilir.
+- Tool Settings satırı görünmüyorsa: viewport'ta *View > Tool Settings*.
 - Item / Tool / View'daki Transform gibi C ile tanımlı yerleşik paneller
   Python'dan çizilemediği için bu satıra alınmaz.
