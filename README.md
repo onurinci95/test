@@ -26,9 +26,22 @@ bir erişim yolu ekler.
 | Include Built-in Tabs | Blender'ın kendi Python sekmelerini de ekle |
 | Popover Width | Açılan pencerenin genişliği |
 
+### Preset'ler (sekme setleri)
+
+Her preset kendi sekme listesini (sıra, görünürlük, özel isimler) tutar. Örneğin
+"Modeling" setinde BoxCutter ve 3D Print, "Texturing" setinde başka sekmeler.
+
+- Ayarlardaki **Presets** listesinden **+** ile seçili preset'in kopyası olarak yeni
+  preset oluşturulur, **−** ile silinir. İsme çift tıklayarak yeniden adlandırılır.
+- Bir preset'e **workspace** atanırsa o workspace'e geçince otomatik olarak devreye girer
+  (header'da 🖥 ikonuyla gösterilir).
+- Birden fazla preset varsa header'daki preset menüsünden tek tıkla geçilir. Elle seçim,
+  workspace değiştirilene kadar geçerli kalır.
+- 1.3.0 ve öncesindeki sekme listesi ilk açılışta otomatik olarak **Default** preset'ine aktarılır.
+
 ### Sekmeleri özelleştirme
 
-Ayarlardaki **Tabs** listesinde algılanan her sekme bir satırdır:
+Ayarlardaki **Tabs** listesi seçili preset'in sekmelerini gösterir; her sekme bir satırdır:
 
 - 👁 göz ikonu: sekmeyi satırda göster / gizle
 - sağdaki metin kutusu: butonda görünecek özel isim (boş = sekmenin kendi adı)

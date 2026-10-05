@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -65,6 +65,10 @@ _children = {}
 _signature = None
 _attached_header = None
 _attached_hook = None  # name of the wrapped method when Position = Middle
+# Workspace -> preset switching is tracked here, not in properties, because
+# it is detected while drawing, where properties can't be written.
+_last_workspace = None
+_workspace_preset = None  # name of the preset bound to the current workspace
 
 
 # -----------------------------------------------------------------------------
@@ -291,10 +295,18 @@ def _draw_tabs(layout, context, middle=None):
         if area is not None and area.spaces.active.show_region_ui:
             active = _active_category(region)
 
+    preset = _effective_preset(prefs, context)
+    tabs = preset.tabs if preset is not None else prefs.tabs
+
     if middle == "AFTER" or (middle is None and prefs.align_right):
         layout.separator_spacer()
+    if preset is not None and prefs.show_preset_menu and len(prefs.presets) > 1:
+        layout.menu(
+            "TOPTABS_MT_presets", text=preset.name,
+            icon="WORKSPACE" if preset.name == _workspace_preset else "PRESET",
+        )
     row = layout.row(align=True)
-    for category, label, visible in _ordered_tabs(prefs):
+    for category, label, visible in _ordered_tabs(prefs, tabs):
         if not visible:
             continue
         if not any(_poll(cls, context) for cls in _category_panels.get(category, ())):
@@ -417,7 +429,36 @@ def _redraw_all():
 # User's tab list (order, visibility, custom names)
 
 
-def _ordered_tabs(prefs):
+def _edit_preset(prefs):
+    """The preset selected in the preferences (and in the header menu)."""
+    if 0 <= prefs.preset_index < len(prefs.presets):
+        return prefs.presets[prefs.preset_index]
+    return prefs.presets[0] if len(prefs.presets) else None
+
+
+def _edit_tabs(prefs):
+    preset = _edit_preset(prefs)
+    return preset.tabs if preset is not None else prefs.tabs
+
+
+def _effective_preset(prefs, context):
+    """Preset shown in the header: the one bound to the current workspace,
+    picked when the user switches to that workspace, else the selected one."""
+    global _last_workspace, _workspace_preset
+    workspace = getattr(context, "workspace", None)
+    name = workspace.name if workspace else None
+    if name != _last_workspace:
+        _last_workspace = name
+        bound = next((p for p in prefs.presets if name and p.workspace == name), None)
+        _workspace_preset = bound.name if bound else None
+    if _workspace_preset:
+        bound = prefs.presets.get(_workspace_preset)
+        if bound is not None:
+            return bound
+    return _edit_preset(prefs)
+
+
+def _ordered_tabs(prefs, tabs):
     """Detected tabs as (category, label, visible), in the user's order.
 
     Tabs the user hasn't seen in the list yet go last and are visible, unless
@@ -425,7 +466,7 @@ def _ordered_tabs(prefs):
     """
     result = []
     seen = set()
-    for item in prefs.tabs:
+    for item in tabs:
         if item.name in _proxies and item.name not in seen:
             seen.add(item.name)
             result.append((item.name, item.label.strip() or item.name, item.visible))
@@ -444,19 +485,39 @@ def _sync_tabs():
     prefs = _prefs()
     if prefs is None:
         return
-    known = {item.name for item in prefs.tabs}
     legacy_hidden = _excluded_categories(prefs)
-    for name in _proxies:
-        if name not in known:
-            item = prefs.tabs.add()
-            item.name = name
-            item.visible = name.lower() not in legacy_hidden
+
+    if not len(prefs.presets):
+        # First run, or upgrade from <= 1.3.0: the old single list becomes
+        # the "Default" preset.
+        preset = prefs.presets.add()
+        preset.name = "Default"
+        _copy_tabs(prefs.tabs, preset.tabs)
+        prefs.preset_index = 0
+
+    for preset in prefs.presets:
+        known = {item.name for item in preset.tabs}
+        for name in _proxies:
+            if name not in known:
+                item = preset.tabs.add()
+                item.name = name
+                item.visible = name.lower() not in legacy_hidden
+        if legacy_hidden:
+            for item in preset.tabs:
+                if item.name.lower() in legacy_hidden:
+                    item.visible = False
     if prefs.excluded_categories:
-        # Migrated into the list above.
-        for item in prefs.tabs:
-            if item.name.lower() in legacy_hidden:
-                item.visible = False
+        # Migrated into the lists above.
         prefs.excluded_categories = ""
+
+
+def _copy_tabs(source, target):
+    target.clear()
+    for src in source:
+        item = target.add()
+        item.name = src.name
+        item.visible = src.visible
+        item.label = src.label
 
 
 # -----------------------------------------------------------------------------
@@ -607,8 +668,9 @@ class TOPTABS_OT_move_tab(bpy.types.Operator):
 
     def execute(self, context):
         prefs = _prefs()
-        tabs = prefs.tabs
-        index = prefs.tabs_index
+        owner = _edit_preset(prefs) or prefs
+        tabs = owner.tabs
+        index = owner.tabs_index
         if not 0 <= index < len(tabs):
             return {"CANCELLED"}
         target = {
@@ -620,7 +682,7 @@ class TOPTABS_OT_move_tab(bpy.types.Operator):
         target = max(0, min(len(tabs) - 1, target))
         if target != index:
             tabs.move(index, target)
-            prefs.tabs_index = target
+            owner.tabs_index = target
             _redraw_all()
         return {"FINISHED"}
 
@@ -637,7 +699,7 @@ class TOPTABS_OT_set_all_visible(bpy.types.Operator):
         return "Show all tabs" if properties.visible else "Hide all tabs"
 
     def execute(self, context):
-        for item in _prefs().tabs:
+        for item in _edit_tabs(_prefs()):
             item.visible = self.visible
         _redraw_all()
         return {"FINISHED"}
@@ -650,7 +712,7 @@ class TOPTABS_OT_sort_tabs(bpy.types.Operator):
     bl_options = {"INTERNAL"}
 
     def execute(self, context):
-        tabs = _prefs().tabs
+        tabs = _edit_tabs(_prefs())
         names = sorted((item.name for item in tabs), key=str.lower)
         for target, name in enumerate(names):
             current = next(i for i, item in enumerate(tabs) if item.name == name)
@@ -667,11 +729,103 @@ class TOPTABS_OT_remove_missing(bpy.types.Operator):
 
     def execute(self, context):
         prefs = _prefs()
-        for index in reversed(range(len(prefs.tabs))):
-            if prefs.tabs[index].name not in _proxies:
-                prefs.tabs.remove(index)
-        prefs.tabs_index = min(prefs.tabs_index, max(0, len(prefs.tabs) - 1))
+        for owner in list(prefs.presets) + [prefs]:
+            for index in reversed(range(len(owner.tabs))):
+                if owner.tabs[index].name not in _proxies:
+                    owner.tabs.remove(index)
+            owner.tabs_index = min(owner.tabs_index, max(0, len(owner.tabs) - 1))
         return {"FINISHED"}
+
+
+def _unique_preset_name(prefs, base):
+    names = {p.name for p in prefs.presets}
+    if base not in names:
+        return base
+    i = 2
+    while f"{base} {i}" in names:
+        i += 1
+    return f"{base} {i}"
+
+
+class TOPTABS_OT_preset_add(bpy.types.Operator):
+    bl_idname = "toptabs.preset_add"
+    bl_label = "Add Preset"
+    bl_description = "Add a new preset, starting as a copy of the selected one"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        prefs = _prefs()
+        source = _edit_preset(prefs)
+        preset = prefs.presets.add()
+        preset.name = _unique_preset_name(prefs, source.name if source else "Preset")
+        _copy_tabs(source.tabs if source else prefs.tabs, preset.tabs)
+        prefs.preset_index = len(prefs.presets) - 1
+        _sync_tabs()
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_preset_remove(bpy.types.Operator):
+    bl_idname = "toptabs.preset_remove"
+    bl_label = "Remove Preset"
+    bl_description = "Remove the selected preset"
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        prefs = _prefs()
+        return prefs is not None and len(prefs.presets) > 1
+
+    def execute(self, context):
+        prefs = _prefs()
+        prefs.presets.remove(prefs.preset_index)
+        prefs.preset_index = min(prefs.preset_index, len(prefs.presets) - 1)
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_preset_activate(bpy.types.Operator):
+    bl_idname = "toptabs.preset_activate"
+    bl_label = "Switch Preset"
+    bl_description = "Show this preset's tabs in the header"
+    bl_options = {"INTERNAL"}
+
+    index: IntProperty()
+
+    def execute(self, context):
+        global _workspace_preset
+        prefs = _prefs()
+        if not 0 <= self.index < len(prefs.presets):
+            return {"CANCELLED"}
+        prefs.preset_index = self.index
+        # A manual choice wins until the user switches workspace again.
+        _workspace_preset = None
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_MT_presets(bpy.types.Menu):
+    bl_label = "Tab Presets"
+
+    def draw(self, context):
+        layout = self.layout
+        prefs = _prefs()
+        current = _effective_preset(prefs, context)
+        for index, preset in enumerate(prefs.presets):
+            text = preset.name + (f"   ({preset.workspace})" if preset.workspace else "")
+            layout.operator(
+                "toptabs.preset_activate", text=text,
+                icon="CHECKMARK" if preset == current else "BLANK1",
+            ).index = index
+        layout.separator()
+        layout.operator("preferences.addon_show", text="Edit Presets...", icon="PREFERENCES").module = ADDON_ID
+
+
+class TOPTABS_UL_presets(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, "name", text="", emboss=False, icon="PRESET")
+        row.prop_search(item, "workspace", bpy.data, "workspaces", text="", icon="WORKSPACE")
 
 
 class TOPTABS_UL_tabs(bpy.types.UIList):
@@ -730,6 +884,17 @@ class TOPTABS_PG_tab(bpy.types.PropertyGroup):
     )
 
 
+class TOPTABS_PG_preset(bpy.types.PropertyGroup):
+    # `name` (inherited) is the preset name.
+    workspace: StringProperty(
+        name="Workspace",
+        description="Switch to this preset automatically when this workspace is opened",
+        default="", update=_on_draw_update,
+    )
+    tabs: bpy.props.CollectionProperty(type=TOPTABS_PG_tab)
+    tabs_index: IntProperty(default=0)
+
+
 class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_ID
 
@@ -779,8 +944,16 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
     )
     # Legacy (<= 1.1.0) comma separated list; migrated into `tabs`.
     excluded_categories: StringProperty(default="", options={"HIDDEN"})
+    # Single list used before presets existed (<= 1.3.0); migrated to "Default".
     tabs: bpy.props.CollectionProperty(type=TOPTABS_PG_tab)
     tabs_index: IntProperty(default=0)
+    presets: bpy.props.CollectionProperty(type=TOPTABS_PG_preset)
+    preset_index: IntProperty(default=0, update=_on_draw_update)
+    show_preset_menu: BoolProperty(
+        name="Preset Menu in Header",
+        description="Show a menu to switch presets next to the tabs (when there is more than one preset)",
+        default=True, update=_on_draw_update,
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -798,17 +971,33 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
             col.prop(self, "align_right")
         col.prop(self, "include_builtin")
         col.prop(self, "popover_width")
+        col.prop(self, "show_preset_menu")
 
         box = layout.box()
         box.use_property_split = False
+        box.label(text="Presets  (optionally bound to a workspace)", icon="PRESET")
+        row = box.row()
+        row.template_list(
+            "TOPTABS_UL_presets", "", self, "presets", self, "preset_index",
+            rows=3,
+        )
+        side = row.column(align=True)
+        side.operator("toptabs.preset_add", text="", icon="ADD")
+        side.operator("toptabs.preset_remove", text="", icon="REMOVE")
+
+        preset = _edit_preset(self)
+        owner = preset or self
+        box = layout.box()
+        box.use_property_split = False
         header = box.row()
-        header.label(text="Tabs: order, visibility and custom names", icon="PRESET")
+        title = f"Tabs in '{preset.name}'" if preset else "Tabs"
+        header.label(text=f"{title}: order, visibility and custom names", icon="MENU_PANEL")
         header.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
 
         row = box.row()
         row.template_list(
-            "TOPTABS_UL_tabs", "", self, "tabs", self, "tabs_index",
-            rows=max(6, min(len(self.tabs), 14)),
+            "TOPTABS_UL_tabs", "", owner, "tabs", owner, "tabs_index",
+            rows=max(6, min(len(owner.tabs), 14)),
         )
         side = row.column(align=True)
         side.operator("toptabs.move_tab", text="", icon="TRIA_UP_BAR").direction = "TOP"
@@ -822,7 +1011,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         side.operator("toptabs.sort_tabs", text="", icon="SORTALPHA")
         side.operator("toptabs.remove_missing", text="", icon="TRASH")
 
-        if not self.tabs:
+        if not owner.tabs:
             box.label(text="No tabs yet. They appear here a moment after Blender starts.", icon="INFO")
         else:
             box.label(text="Eye: show/hide  ·  Right field: custom button name  ·  Arrows: reorder", icon="QUESTION")
@@ -835,8 +1024,14 @@ classes = (
     TOPTABS_OT_set_all_visible,
     TOPTABS_OT_sort_tabs,
     TOPTABS_OT_remove_missing,
+    TOPTABS_OT_preset_add,
+    TOPTABS_OT_preset_remove,
+    TOPTABS_OT_preset_activate,
+    TOPTABS_MT_presets,
     TOPTABS_UL_tabs,
+    TOPTABS_UL_presets,
     TOPTABS_PG_tab,
+    TOPTABS_PG_preset,
     TOPTABS_AP_preferences,
 )
 
