@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -267,8 +267,6 @@ def _draw_header(self, context):
             refresh(redraw=False)
         except Exception as ex:
             print(f"[N-Panel Top Tabs] refresh failed: {ex}")
-    excluded = _excluded_categories(prefs)
-
     use_sidebar = prefs.click_action == "SIDEBAR"
     active = None
     if use_sidebar:
@@ -280,18 +278,18 @@ def _draw_header(self, context):
     if prefs.align_right:
         layout.separator_spacer()
     row = layout.row(align=True)
-    for category, idname in _proxies.items():
-        if category.lower() in excluded:
+    for category, label, visible in _ordered_tabs(prefs):
+        if not visible:
             continue
         if not any(_poll(cls, context) for cls in _category_panels.get(category, ())):
             continue
         if use_sidebar:
             op = row.operator(
-                "toptabs.open_sidebar_tab", text=category, depress=category == active
+                "toptabs.open_sidebar_tab", text=label, depress=category == active
             )
             op.category = category
         else:
-            row.popover(panel=idname, text=category)
+            row.popover(panel=_proxies[category], text=label)
     row.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
 
 
@@ -348,6 +346,52 @@ def _redraw_all():
 
 
 # -----------------------------------------------------------------------------
+# User's tab list (order, visibility, custom names)
+
+
+def _ordered_tabs(prefs):
+    """Detected tabs as (category, label, visible), in the user's order.
+
+    Tabs the user hasn't seen in the list yet go last and are visible, unless
+    they are in the legacy comma separated "Hidden Tabs" string.
+    """
+    result = []
+    seen = set()
+    for item in prefs.tabs:
+        if item.name in _proxies and item.name not in seen:
+            seen.add(item.name)
+            result.append((item.name, item.label.strip() or item.name, item.visible))
+    legacy_hidden = _excluded_categories(prefs)
+    for name in _proxies:
+        if name not in seen:
+            result.append((name, name, name.lower() not in legacy_hidden))
+    return result
+
+
+def _sync_tabs():
+    """Add newly detected tabs to the preferences list.
+
+    Not called from draw callbacks, where writing properties is not allowed.
+    """
+    prefs = _prefs()
+    if prefs is None:
+        return
+    known = {item.name for item in prefs.tabs}
+    legacy_hidden = _excluded_categories(prefs)
+    for name in _proxies:
+        if name not in known:
+            item = prefs.tabs.add()
+            item.name = name
+            item.visible = name.lower() not in legacy_hidden
+    if prefs.excluded_categories:
+        # Migrated into the list above.
+        for item in prefs.tabs:
+            if item.name.lower() in legacy_hidden:
+                item.visible = False
+        prefs.excluded_categories = ""
+
+
+# -----------------------------------------------------------------------------
 # Refresh (add-ons can be enabled/disabled at any time)
 
 
@@ -355,18 +399,15 @@ def refresh(force=False, redraw=True):
     global _signature, _category_panels, _children
     prefs = _prefs()
     categories, children = _collect(prefs)
-    sort_alpha = prefs.sort_alphabetical if prefs else False
 
     signature = (
-        sort_alpha,
         tuple((cat, tuple(_panel_idname(c) for c in panels)) for cat, panels in categories.items()),
         tuple((p, tuple(_panel_idname(c) for c in kids)) for p, kids in children.items()),
     )
     if not force and signature == _signature and _proxies:
         return False
 
-    names = sorted(categories, key=str.lower) if sort_alpha else list(categories)
-    names = names[: len(_slot_classes)]
+    names = list(categories)[: len(_slot_classes)]
 
     _category_panels = categories
     _children = children
@@ -387,6 +428,7 @@ def _refresh_timer():
         if _ensure_attached():
             _redraw_all()
         refresh()
+        _sync_tabs()
     except Exception as ex:
         print(f"[N-Panel Top Tabs] refresh failed: {ex}")
     return REFRESH_INTERVAL
@@ -396,6 +438,7 @@ def _refresh_timer():
 def _on_load_post(*_args):
     _ensure_attached()
     refresh(force=True)
+    _sync_tabs()
 
 
 # -----------------------------------------------------------------------------
@@ -482,7 +525,111 @@ class TOPTABS_OT_refresh(bpy.types.Operator):
 
     def execute(self, context):
         refresh(force=True)
+        _sync_tabs()
         return {"FINISHED"}
+
+
+class TOPTABS_OT_move_tab(bpy.types.Operator):
+    bl_idname = "toptabs.move_tab"
+    bl_label = "Move Tab"
+    bl_description = "Move the selected tab up or down"
+    bl_options = {"INTERNAL"}
+
+    direction: EnumProperty(items=[("UP", "Up", ""), ("DOWN", "Down", ""), ("TOP", "Top", ""), ("BOTTOM", "Bottom", "")])
+
+    def execute(self, context):
+        prefs = _prefs()
+        tabs = prefs.tabs
+        index = prefs.tabs_index
+        if not 0 <= index < len(tabs):
+            return {"CANCELLED"}
+        target = {
+            "UP": index - 1,
+            "DOWN": index + 1,
+            "TOP": 0,
+            "BOTTOM": len(tabs) - 1,
+        }[self.direction]
+        target = max(0, min(len(tabs) - 1, target))
+        if target != index:
+            tabs.move(index, target)
+            prefs.tabs_index = target
+            _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_set_all_visible(bpy.types.Operator):
+    bl_idname = "toptabs.set_all_visible"
+    bl_label = "Show/Hide All Tabs"
+    bl_options = {"INTERNAL"}
+
+    visible: BoolProperty()
+
+    @classmethod
+    def description(cls, _context, properties):
+        return "Show all tabs" if properties.visible else "Hide all tabs"
+
+    def execute(self, context):
+        for item in _prefs().tabs:
+            item.visible = self.visible
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_sort_tabs(bpy.types.Operator):
+    bl_idname = "toptabs.sort_tabs"
+    bl_label = "Sort Tabs A-Z"
+    bl_description = "Sort the tab list alphabetically"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        tabs = _prefs().tabs
+        names = sorted((item.name for item in tabs), key=str.lower)
+        for target, name in enumerate(names):
+            current = next(i for i, item in enumerate(tabs) if item.name == name)
+            tabs.move(current, target)
+        _redraw_all()
+        return {"FINISHED"}
+
+
+class TOPTABS_OT_remove_missing(bpy.types.Operator):
+    bl_idname = "toptabs.remove_missing"
+    bl_label = "Remove Missing Tabs"
+    bl_description = "Remove tabs whose add-on is not loaded from the list"
+    bl_options = {"INTERNAL"}
+
+    def execute(self, context):
+        prefs = _prefs()
+        for index in reversed(range(len(prefs.tabs))):
+            if prefs.tabs[index].name not in _proxies:
+                prefs.tabs.remove(index)
+        prefs.tabs_index = min(prefs.tabs_index, max(0, len(prefs.tabs) - 1))
+        return {"FINISHED"}
+
+
+class TOPTABS_UL_tabs(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        loaded = item.name in _proxies
+        row = layout.row(align=True)
+        row.prop(
+            item, "visible", text="", emboss=False,
+            icon="HIDE_OFF" if item.visible else "HIDE_ON",
+        )
+        name = row.row()
+        name.active = loaded and item.visible
+        name.label(text=item.name if loaded else f"{item.name}  (not loaded)")
+        row.prop(item, "label", text="")
+
+    def filter_items(self, context, data, propname):
+        # Keep the list in the user's order; only apply the name filter.
+        items = getattr(data, propname)
+        flags = [self.bitflag_filter_item] * len(items)
+        if self.filter_name:
+            needle = self.filter_name.lower()
+            flags = [
+                self.bitflag_filter_item if needle in item.name.lower() else 0
+                for item in items
+            ]
+        return flags, []
 
 
 def _on_location_update(self, _context):
@@ -501,6 +648,18 @@ def _on_width_update(self, _context):
 
 def _on_draw_update(_self, _context):
     _redraw_all()
+
+
+class TOPTABS_PG_tab(bpy.types.PropertyGroup):
+    # `name` (inherited) is the sidebar category this entry refers to.
+    visible: BoolProperty(
+        name="Visible", description="Show this tab in the header", default=True,
+        update=_on_draw_update,
+    )
+    label: StringProperty(
+        name="Custom Name", description="Name shown on the button (empty: use the tab's own name)",
+        default="", update=_on_draw_update,
+    )
 
 
 class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
@@ -525,7 +684,7 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
             ("POPOVER", "Dropdown", "Show the tab's panels in a dropdown under the button"),
             ("SIDEBAR", "Open in Sidebar", "Open the sidebar (N panel) on this tab; click again to close it"),
         ],
-        default="POPOVER",
+        default="SIDEBAR",
         update=_on_draw_update,
     )
     position: EnumProperty(
@@ -546,18 +705,13 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
         default=False,
         update=_on_layout_update,
     )
-    sort_alphabetical: BoolProperty(
-        name="Sort Alphabetically", default=False, update=_on_layout_update
-    )
     popover_width: IntProperty(
         name="Popover Width", default=14, min=8, max=40, update=_on_width_update
     )
-    excluded_categories: StringProperty(
-        name="Hidden Tabs",
-        description="Comma separated tab names to hide, e.g. 'BlenderKit, polygoniq'",
-        default="",
-        update=_on_draw_update,
-    )
+    # Legacy (<= 1.1.0) comma separated list; migrated into `tabs`.
+    excluded_categories: StringProperty(default="", options={"HIDDEN"})
+    tabs: bpy.props.CollectionProperty(type=TOPTABS_PG_tab)
+    tabs_index: IntProperty(default=0)
 
     def draw(self, context):
         layout = self.layout
@@ -573,17 +727,46 @@ class TOPTABS_AP_preferences(bpy.types.AddonPreferences):
             col.label(text="Some panels may not work outside the 3D Viewport", icon="ERROR")
         col.prop(self, "align_right")
         col.prop(self, "include_builtin")
-        col.prop(self, "sort_alphabetical")
         col.prop(self, "popover_width")
-        col.prop(self, "excluded_categories")
-        if _proxies:
-            col.label(text="Detected tabs: " + ", ".join(_proxies))
-        col.operator("toptabs.refresh", icon="FILE_REFRESH")
+
+        box = layout.box()
+        box.use_property_split = False
+        header = box.row()
+        header.label(text="Tabs: order, visibility and custom names", icon="PRESET")
+        header.operator("toptabs.refresh", text="", icon="FILE_REFRESH", emboss=False)
+
+        row = box.row()
+        row.template_list(
+            "TOPTABS_UL_tabs", "", self, "tabs", self, "tabs_index",
+            rows=max(6, min(len(self.tabs), 14)),
+        )
+        side = row.column(align=True)
+        side.operator("toptabs.move_tab", text="", icon="TRIA_UP_BAR").direction = "TOP"
+        side.operator("toptabs.move_tab", text="", icon="TRIA_UP").direction = "UP"
+        side.operator("toptabs.move_tab", text="", icon="TRIA_DOWN").direction = "DOWN"
+        side.operator("toptabs.move_tab", text="", icon="TRIA_DOWN_BAR").direction = "BOTTOM"
+        side.separator()
+        side.operator("toptabs.set_all_visible", text="", icon="HIDE_OFF").visible = True
+        side.operator("toptabs.set_all_visible", text="", icon="HIDE_ON").visible = False
+        side.separator()
+        side.operator("toptabs.sort_tabs", text="", icon="SORTALPHA")
+        side.operator("toptabs.remove_missing", text="", icon="TRASH")
+
+        if not self.tabs:
+            box.label(text="No tabs yet. They appear here a moment after Blender starts.", icon="INFO")
+        else:
+            box.label(text="Eye: show/hide  ·  Right field: custom button name  ·  Arrows: reorder", icon="QUESTION")
 
 
 classes = (
     TOPTABS_OT_refresh,
     TOPTABS_OT_open_sidebar_tab,
+    TOPTABS_OT_move_tab,
+    TOPTABS_OT_set_all_visible,
+    TOPTABS_OT_sort_tabs,
+    TOPTABS_OT_remove_missing,
+    TOPTABS_UL_tabs,
+    TOPTABS_PG_tab,
     TOPTABS_AP_preferences,
 )
 

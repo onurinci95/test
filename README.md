@@ -21,12 +21,24 @@ bir erişim yolu ekler.
 |---|---|
 | Location | Butonların yeri: Tool Settings Header (varsayılan, BlenderKit arama çubuğunun olduğu 2. satır), Viewport Header veya Top Bar |
 | Position | Satırın başına (Start, sol) veya sonuna (End, sağ) ekle |
-| On Click | **Dropdown**: panelleri butonun altında açılan pencerede gösterir. **Open in Sidebar**: N paneli açıp o sekmeye geçer (açık sekmenin butonu basılı görünür, tekrar tıklayınca N panel kapanır) |
+| On Click | **Open in Sidebar** (varsayılan): N paneli açıp o sekmeye geçer (açık sekmenin butonu basılı görünür, tekrar tıklayınca N panel kapanır). **Dropdown**: panelleri butonun altında açılan pencerede gösterir |
 | Align Right | Butonları başlığın sağına yasla |
 | Include Built-in Tabs | Blender'ın kendi Python sekmelerini de ekle |
-| Sort Alphabetically | Sekmeleri alfabetik sırala |
 | Popover Width | Açılan pencerenin genişliği |
-| Hidden Tabs | Gizlenecek sekmeler, virgülle: `Blendkit, polygoniq` |
+
+### Sekmeleri özelleştirme
+
+Ayarlardaki **Tabs** listesinde algılanan her sekme bir satırdır:
+
+- 👁 göz ikonu: sekmeyi satırda göster / gizle
+- sağdaki metin kutusu: butonda görünecek özel isim (boş = sekmenin kendi adı)
+- sağdaki oklar: seçili sekmeyi en üste / yukarı / aşağı / en alta taşı
+- 👁 / 🚫: hepsini göster / hepsini gizle
+- A→Z: alfabetik sırala
+- 🗑: yüklü olmayan (kapatılmış eklentilere ait) sekmeleri listeden sil
+
+Ayarlar Blender tercihleriyle birlikte kaydedilir. Yeni yüklenen eklentilerin sekmeleri
+listenin sonuna, görünür olarak eklenir.
 
 Yeni bir eklenti açıp kapattığınızda sekmeler birkaç saniye içinde kendiliğinden
 güncellenir; satırın sonundaki ⟳ butonu ile elle de yenileyebilirsiniz.
