@@ -12,7 +12,7 @@ eklenti yalnızca onlara ikinci, daha okunaklı bir erişim yolu ekler.
 bl_info = {
     "name": "N-Panel Top Tabs",
     "author": "onurinci95",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (4, 2, 0),
     "location": "3D Viewport > Header",
     "description": "Show sidebar (N panel) add-on tabs as horizontal header buttons",
@@ -299,9 +299,28 @@ def _detach_header():
     if _attached_header is not None:
         try:
             _attached_header.remove(_draw_header)
-        except ValueError:
+        except Exception:
             pass
         _attached_header = None
+
+
+def _ensure_attached():
+    """Re-attach if another add-on replaced the header class or its draw().
+
+    Some add-ons re-register VIEW3D_HT_tool_header (or monkey-patch its draw
+    method) after we load, which silently drops our appended draw function.
+    """
+    prefs = _prefs()
+    location = prefs.location if prefs else "VIEW3D_TOOL_HEADER"
+    position = prefs.position if prefs else "END"
+    header = getattr(bpy.types, HEADER_TYPES[location], None)
+    if header is None:
+        return False
+    draw_funcs = getattr(getattr(header, "draw", None), "_draw_funcs", None) or ()
+    if header is _attached_header and _draw_header in draw_funcs:
+        return False
+    _attach_header(location, position)
+    return True
 
 
 def _redraw_all():
@@ -352,6 +371,8 @@ def refresh(force=False, redraw=True):
 
 def _refresh_timer():
     try:
+        if _ensure_attached():
+            _redraw_all()
         refresh()
     except Exception as ex:
         print(f"[N-Panel Top Tabs] refresh failed: {ex}")
@@ -360,6 +381,7 @@ def _refresh_timer():
 
 @bpy.app.handlers.persistent
 def _on_load_post(*_args):
+    _ensure_attached()
     refresh(force=True)
 
 
